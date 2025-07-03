@@ -15,7 +15,7 @@ import os
 class Watcher:
 
     # this is the directory where you will add the files to
-    DIRECTORY_TO_WATCH = os.getcwd() + "/input_data"
+    DIRECTORY_TO_WATCH = "/Users/piyushwanchoo/Library/CloudStorage/OneDrive-JohnsHopkins/Malon_PDV_scope/Cu_Polycrystals/Cu_100nm/20241205_varying_velocity_spall"
 
     def __init__(self):
         self.observer = Observer()
@@ -54,14 +54,14 @@ class Handler(FileSystemEventHandler):
                 filename=fname,
                 save_data="yes",
                 start_time_user="none",
-                header_lines=1,
-                time_to_skip=2.3e-6,
-                time_to_take=1.5e-6,
-                t_before=5e-9,
-                t_after=50e-9,
+                header_lines=5,
+                time_to_skip=6e-6,
+                time_to_take=1e-6,
+                t_before=10e-9,
+                t_after=60e-9,
                 start_time_correction=0e-9,
-                freq_min=1.5e9,
-                freq_max=4e9,
+                freq_min=2.5e9,
+                freq_max=5e9,
                 smoothing_window=601,
                 smoothing_wid=3,
                 smoothing_amp=1,
@@ -83,17 +83,17 @@ class Handler(FileSystemEventHandler):
                 cmap="viridis",
                 uncert_mult=100,
                 order=6,
-                wid=5e7,
-                lam=1547.461e-9,
-                C0=4540,
-                density=1730,
+                wid=25e7,
+                lam=1547.532e-9,
+                C0=3950,
+                density=8900,
                 delta_rho=9,
                 delta_C0=23,
                 delta_lam=8e-18,
                 theta=0,
                 delta_theta=5,
-                exp_data_dir=(os.getcwd() + "/input_data"),
-                out_files_dir=(os.getcwd() + "/output_data"),
+                exp_data_dir= "/Users/piyushwanchoo/Library/CloudStorage/OneDrive-JohnsHopkins/Malon_PDV_scope/Cu_Polycrystals/Cu_100nm/20241205_varying_velocity_spall",
+                out_files_dir="/Users/piyushwanchoo/Library/CloudStorage/OneDrive-JohnsHopkins/Malon_PDV_scope/Cu_Polycrystals/Cu_100nm/20241205_varying_velocity_spall/Output",
                 display_plots="yes",
                 spall_calculation="yes",
                 plot_figsize=(30, 10),
@@ -104,3 +104,5 @@ class Handler(FileSystemEventHandler):
 if __name__ == "__main__":
     w = Watcher()
     w.run()
+
+# %%

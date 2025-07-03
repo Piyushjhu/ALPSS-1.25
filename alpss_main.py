@@ -1,3 +1,4 @@
+# %%
 from datetime import datetime
 import traceback
 from IPython.display import display
@@ -13,6 +14,13 @@ from scipy import signal
 import findiff
 import cv2 as cv
 from scipy.signal import ShortTimeFFT
+from scipy.interpolate import interp1d
+from scipy.signal import savgol_filter
+
+
+def gaussian_window(window_length, std):
+    n = np.arange(0, window_length) - (window_length - 1.0) / 2.0
+    return np.exp(-0.5 * (n / std) ** 2)
 
 
 # main function to link together all the sub-functions
@@ -32,6 +40,7 @@ def alpss_main(**inputs):
 
         # function to find the carrier frequency
         cen = carrier_frequency(sdf_out, **inputs)
+        # print(cen)
 
         # function to filter out the carrier frequency after the signal has started
         cf_out = carrier_filter(sdf_out, cen, **inputs)
@@ -449,6 +458,8 @@ def instantaneous_uncertainty_analysis(sdf_out, vc_out, cen, **inputs):
 
     # calculate the fitted curve
     volt_fit = sin_func(time_cut, popt[0], popt[1], popt[2], popt[3])
+    # print(popt[1])
+    # print(cen)
 
     # calculate the residuals
     noise = voltage_filt_early - volt_fit
@@ -937,6 +948,51 @@ def plotting(
     # fix the layout
     plt.tight_layout()
 
+    # Save each subplot as a separate figure with IQ-style formatting
+    subplot_info = [
+        (ax1, 'voltage_data'),
+        (ax2, 'noise_histogram'),
+        (ax3, 'imported_spectrogram'),
+        (ax4, 'thresholded_spectrogram'),
+        (ax5, 'roi_spectrogram'),
+        (ax6, 'filtered_roi_spectrogram'),
+        (ax7, 'voltage_roi'),
+        (ax8, 'velocity_spectrogram_overlay'),
+        (ax10, 'noise_fraction'),
+        (ax11, 'velocity_uncertainty'),
+        (ax12, 'velocity_trace_spall'),
+        (ax13, 'results_table'),
+    ]
+    # Output directory and filename prefix
+    out_dir = inputs.get('out_files_dir', '.')
+    fname_prefix = os.path.splitext(inputs.get('filename', 'ALPSS'))[0]
+    for ax, tag in subplot_info:
+        fig_sub, ax_sub = plt.subplots(figsize=(8, 8))
+        for line in ax.get_lines():
+            ax_sub.plot(line.get_xdata(), line.get_ydata(), label=line.get_label(), color=line.get_color(), linestyle=line.get_linestyle())
+        # Copy images if present (for imshow plots)
+        for im in ax.get_images():
+            ax_sub.imshow(im.get_array(), aspect='auto', origin=im.origin, extent=im.get_extent(), cmap=im.get_cmap())
+        # Copy fill_between if present
+        for collection in ax.collections:
+            ax_sub.add_collection(collection)
+        # Copy axis labels and title
+        ax_sub.set_xlabel(ax.get_xlabel(), fontsize=20)
+        ax_sub.set_ylabel(ax.get_ylabel(), fontsize=20)
+        ax_sub.set_title(ax.get_title(), fontsize=20)
+        # Copy axis limits
+        ax_sub.set_xlim(ax.get_xlim())
+        ax_sub.set_ylim(ax.get_ylim())
+        # Copy ticks
+        ax_sub.tick_params(axis='both', labelsize=20)
+        # Copy legend if present
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax_sub.legend(handles, labels, fontsize=12)
+        plt.tight_layout()
+        fig_sub.savefig(os.path.join(out_dir, f"{fname_prefix}--{tag}.png"), dpi=inputs.get('plot_dpi', 300), format='png', facecolor='w')
+        plt.close(fig_sub)
+
     # display the plots if desired. if this is turned off the plots will still save
     if inputs["display_plots"] == "yes":
         plt.show()
@@ -1273,6 +1329,130 @@ def spall_doi_finder(**inputs):
     # calculate the short time fourier transform
     f, t, Zxx = stft(voltage, fs, **inputs)
 
+ # Add IQ analysis section after loading time and voltage data
+    def gaussian_window(M, std):
+        n = np.arange(0, M) - (M - 1.0) / 2.0
+        return np.exp(-0.5 * (n / std)**2)
+
+#   # Perform IQ analysis
+# Extract carrier frequency from input data
+    N = len(voltage)
+    fft_result = np.fft.fft(voltage)
+    freq = np.fft.fftfreq(N, 1/fs)
+    positive_freq_mask = freq > 0
+    positive_freq = freq[positive_freq_mask]
+    positive_fft = np.abs(fft_result[positive_freq_mask])
+
+    # Find the frequency with maximum amplitude within the specified range
+    freq_range_mask = (positive_freq >= inputs["freq_min"]) & (positive_freq <= inputs["freq_max"])
+    carrier_idx = np.argmax(positive_fft[freq_range_mask])
+    carrier_frequency = positive_freq[freq_range_mask][carrier_idx]
+
+    print(f"Extracted carrier frequency: {carrier_frequency} Hz")
+    
+    # Demodulate signal
+    I = voltage * np.cos(2 * np.pi * carrier_frequency * time)
+    Q = voltage * np.sin(2 * np.pi * carrier_frequency * time)
+
+    # Apply Gaussian smoothing with skip points
+    skip_points = 100 # skipping initial points to avoid IQ analysis induced signal drop
+    window_length = 801
+    window = np.exp(-0.5 * (np.arange(0, window_length) - (window_length - 1.0) / 2.0) / 10**2)
+    I_smooth = signal.convolve(I, window, mode='same')[skip_points:] / sum(window)
+    Q_smooth = signal.convolve(Q, window, mode='same')[skip_points:] / sum(window)
+    
+   
+    # Calculate amplitude and phase
+    amplitude = np.sqrt(I_smooth**2 + Q_smooth**2)
+    phase = np.unwrap(np.arctan2(Q_smooth, I_smooth))
+ 
+    # Find initial stable amplitude
+    initial_amplitude = np.mean(amplitude[:int(len(amplitude)/4.5)])
+    # initial_phase = np.mean(phase[:int(len(phase)/4)])
+    threshold = 0.4 * initial_amplitude
+    
+    # Detect start time using 50% amplitude drop
+    start_index = np.where(amplitude < threshold)[0][0]
+    # start_index = np.where(phase < threshold)[0][0]
+    t_start_detected_iq = time[start_index]
+
+    # Detect start time using multiple drops
+    # start_index = 0
+    # while start_index < len(amplitude):
+    #     drop_indices = np.where(amplitude[start_index:] < threshold)[0]
+    #     if len(drop_indices) == 0:
+    #         break
+        
+    #     drop_start = start_index + drop_indices[0]
+        
+    #     # Check if signal rises again
+    #     rise_indices = np.where(amplitude[drop_start:] > threshold)[0]
+    #     if len(rise_indices) == 0:
+    #         start_index = drop_start
+    #         break
+        
+    #     rise_index = drop_start + rise_indices[0]
+    #     start_index = rise_index
+
+    # t_start_detected_iq = time[start_index]
+
+
+
+    # After calculating amplitude, adjust time array to match
+    time_adjusted = time[skip_points:skip_points+len(amplitude)]
+
+    # Convert amplitude to mV and time to microseconds
+    amplitude_mV = amplitude * 1e3
+    time_us = time_adjusted * 1e6
+
+    # Plot with matched array lengths and square aspect ratio
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 8))
+    ax1.plot(time_us, amplitude_mV, label='Complex Amplitude')
+    ax1.plot(time_us, initial_amplitude * 1e3 * np.where(time_us < t_start_detected_iq * 1e6, 1, 0.5), 
+            label='Step Function')
+    ax1.axvline(x=t_start_detected_iq * 1e6, color='r', linestyle='--', 
+                label='Start Time (IQ)')
+    ax1.set_ylabel('Amplitude (mV)', fontsize=20)
+    ax1.set_xlabel('Time (μs)', fontsize=20)
+    ax1.legend(fontsize=12)
+    ax1.tick_params(axis='both', labelsize=20)
+
+    # Save IQ amplitude plot as a separate figure
+    out_dir = inputs.get('out_files_dir', '.')
+    fname_prefix = os.path.splitext(inputs.get('filename', 'ALPSS'))[0]
+    fig_iq, ax_iq = plt.subplots(figsize=(8, 8))
+    ax_iq.plot(time_us, amplitude_mV, label='Complex Amplitude')
+    ax_iq.plot(time_us, initial_amplitude * 1e3 * np.where(time_us < t_start_detected_iq * 1e6, 1, 0.5), 
+            label='Step Function')
+    ax_iq.axvline(x=t_start_detected_iq * 1e6, color='r', linestyle='--', 
+                label='Start Time (IQ)')
+    ax_iq.set_ylabel('Amplitude (mV)', fontsize=20)
+    ax_iq.set_xlabel('Time (μs)', fontsize=20)
+    ax_iq.legend(fontsize=12)
+    ax_iq.tick_params(axis='both', labelsize=20)
+    plt.tight_layout()
+    fig_iq.savefig(os.path.join(out_dir, f"{fname_prefix}--IQ_amplitude.png"), dpi=inputs.get('plot_dpi', 300), format='png', facecolor='w')
+    plt.close(fig_iq)
+
+    # Adjust phase plotting similarly
+    ax2.plot(time_us, phase, label='Phase', color='green')
+    ax2.set_xlabel('Time (μs)', fontsize=20)
+    ax2.set_ylabel('Phase (radians)', fontsize=20)
+    ax2.legend(fontsize=12)
+    ax2.tick_params(axis='both', labelsize=20)
+    plt.tight_layout()
+
+    # Add IQ results to output dictionary
+    sdf_out = {
+        # ... (previous dictionary items)
+        "amplitude_iq": amplitude,
+        "phase_iq": phase,
+        "t_start_detected_iq": t_start_detected_iq,
+    }
+
+    
+## end of IQ analysis
+ 
     # calculate magnitude of Zxx
     mag = np.abs(Zxx)
 
@@ -1290,6 +1470,7 @@ def spall_doi_finder(**inputs):
 
     # calculate spectrogram power
     power_cut = 10 * np.log10(mag_cut**2)
+
 
     # convert spectrogram powers to uint8 for image processing
     smin = np.min(power_cut)
@@ -1353,7 +1534,12 @@ def spall_doi_finder(**inputs):
                 break
 
         # add in the user correction for the start time
-        t_start_detected = t[cidx]
+        t_start_detected_old = t[cidx]
+        t_start_detected = t_start_detected_iq
+        # t_start_detected = max(t_start_detected_iq, t_start_detected_old)
+        # using mean of the IQ threshold drop and Jake's paper start detection (old) 
+        # t_start_detected = np.mean([t_start_detected_iq, t_start_detected_old])
+
         t_start_corrected = t_start_detected + inputs["start_time_correction"]
         t_doi_start = t_start_corrected - inputs["t_before"]
         t_doi_end = t_start_corrected + inputs["t_after"]
@@ -1362,6 +1548,7 @@ def spall_doi_finder(**inputs):
         t_doi_end_spec_idx = np.argmin(np.abs(t - t_doi_end))
         mag_doi = mag_cut[:, t_doi_start_spec_idx:t_doi_end_spec_idx]
         power_doi = 10 * np.log10(mag_doi**2)
+        
 
     # if using a user input for the signal start time
     else:
@@ -1382,7 +1569,21 @@ def spall_doi_finder(**inputs):
         t_doi_end_spec_idx = np.argmin(np.abs(t - t_doi_end))
         mag_doi = mag_cut[:, t_doi_start_spec_idx:t_doi_end_spec_idx]
         power_doi = 10 * np.log10(mag_doi**2)
+        
 
+    cen=carrier_frequency # measured frequency 
+    cen_idx = np.argmin(np.abs(f - cen))
+    mag_cen = mag[cen_idx,:]
+    fig, ax = plt.subplots(1,1)
+    ax.plot(t, mag_cen)
+    plt.tight_layout()
+    plt.show()
+
+    print(f"t_start_detected_old: {t_start_detected_old}")
+    print(f"t_start_detected_iq: {t_start_detected_iq}")
+    print(f"t_start_detected: {t_start_detected}")
+    print(f"t_start_corrected: {t_start_corrected}")
+  
     # dictionary to return outputs
     sdf_out = {
         "time": time,
@@ -1407,7 +1608,6 @@ def spall_doi_finder(**inputs):
     }
 
     return sdf_out
-
 
 # function to calculate the short time fourier transform (stft) of a signal. ALPSS was originally built with a scipy
 # STFT function that may now be deprecated in the future. This function seeks to roughly replicate the behavior of the
@@ -1446,12 +1646,151 @@ def stft(voltage, fs, **inputs):
     # return the frequency, time, and magnitude arrays
     return f, t_crop, Sx_crop
 
+## original as per ALPSS
+# # function to calculate the velocity from the filtered voltage signal
+# def velocity_calculation(
+#     spall_doi_finder_outputs, cen, carrier_filter_outputs, **inputs
+# ):
+#     # unpack dictionary values in to individual variables
+#     fs = spall_doi_finder_outputs["fs"]
+#     time = spall_doi_finder_outputs["time"]
+#     voltage_filt = carrier_filter_outputs["voltage_filt"]
+#     freq_min = inputs["freq_min"]
+#     freq_max = inputs["freq_max"]
+#     lam = inputs["lam"]
+#     t_doi_start = spall_doi_finder_outputs["t_doi_start"]
+#     t_doi_end = spall_doi_finder_outputs["t_doi_end"]
 
-# function to calculate the velocity from the filtered voltage signal
+#     # isolate signal. filter out all frequencies that are outside the range of interest
+#     numpts = len(time)
+#     freq = fftshift(np.arange((-numpts / 2), (numpts / 2)) * fs / numpts)
+#     filt = (freq > freq_min) * (freq < freq_max)
+#     voltage_filt = ifft(fft(voltage_filt) * filt)
+
+#     # get the indices in the time array closest to the domain start and end times
+#     time_start_idx = np.argmin(np.abs(time - t_doi_start))
+#     time_end_idx = np.argmin(np.abs(time - t_doi_end))
+
+#     # unwrap the phase angle of the filtered voltage signal
+#     phas = np.unwrap(np.angle(voltage_filt), axis=0)
+
+#     # take the numerical derivative using the certral difference method with a 9-point stencil
+#     # return the derivative on the domain of interest (dpdt) as well as the padded derivative to be used for smoothing
+#     dpdt, dpdt_pad = num_derivative(
+#         phas, inputs["smoothing_window"], time_start_idx, time_end_idx, fs
+#     )
+
+#     # convert the derivative in to velocity
+#     velocity_pad = (lam / 2) * (dpdt_pad - cen)
+#     velocity_f = (lam / 2) * (dpdt - cen)
+
+#     # crop the time array
+#     time_f = time[time_start_idx:time_end_idx]
+
+#     # smooth the padded velocity signal using a moving average with gaussian weights
+#     velocity_f_smooth = smoothing(
+#         velocity_pad=velocity_pad,
+#         smoothing_window=inputs["smoothing_window"],
+#         smoothing_wid=inputs["smoothing_wid"],
+#         smoothing_amp=inputs["smoothing_amp"],
+#         smoothing_sigma=inputs["smoothing_sigma"],
+#         smoothing_mu=inputs["smoothing_mu"],
+#     )
+
+#     # return a dictionary of the outputs
+#     vc_out = {
+#         "time_f": time_f,
+#         "velocity_f": velocity_f,
+#         "velocity_f_smooth": velocity_f_smooth,
+#         "phasD2_f": dpdt,
+#         "voltage_filt": voltage_filt,
+#         "time_start_idx": time_start_idx,
+#         "time_end_idx": time_end_idx,
+#     }
+
+#     return vc_out
+
+# ## inetration 1 on signal drop off removal
+# # Function to calculate the velocity from the filtered voltage signal
+# def velocity_calculation(
+#     spall_doi_finder_outputs, cen, carrier_filter_outputs, **inputs
+# ):
+#     # Unpack dictionary values into individual variables
+#     fs = spall_doi_finder_outputs["fs"]
+#     time = spall_doi_finder_outputs["time"]
+#     voltage_filt = carrier_filter_outputs["voltage_filt"]
+#     freq_min = inputs["freq_min"]
+#     freq_max = inputs["freq_max"]
+#     lam = inputs["lam"]
+#     t_doi_start = spall_doi_finder_outputs["t_doi_start"]
+#     t_doi_end = spall_doi_finder_outputs["t_doi_end"]
+
+#     # Handle signal drop-offs by identifying and interpolating gaps
+#     valid_indices = np.where(~np.isnan(voltage_filt))[0]  # Indices with valid signal
+#     if len(valid_indices) < len(voltage_filt):
+#         interp_func = interp1d(
+#             time[valid_indices],
+#             voltage_filt[valid_indices],
+#             kind='linear',
+#             bounds_error=False,
+#             fill_value="extrapolate"
+#         )
+#         voltage_filt = interp_func(time)
+
+#     # Isolate signal. Filter out frequencies outside the range of interest
+#     numpts = len(time)
+#     freq = fftshift(np.arange((-numpts / 2), (numpts / 2)) * fs / numpts)
+#     filt = (freq > freq_min) & (freq < freq_max)
+#     voltage_filt = ifft(fft(voltage_filt) * filt)
+
+#     # Get indices in the time array closest to the domain start and end times
+#     time_start_idx = np.argmin(np.abs(time - t_doi_start))
+#     time_end_idx = np.argmin(np.abs(time - t_doi_end))
+
+#     # Unwrap the phase angle of the filtered voltage signal
+#     phas = np.unwrap(np.angle(voltage_filt), axis=0)
+
+#     # Take the numerical derivative using the central difference method with a 9-point stencil
+#     dpdt, dpdt_pad = num_derivative(
+#         phas, inputs["smoothing_window"], time_start_idx, time_end_idx, fs
+#     )
+
+#     # Convert the derivative into velocity
+#     velocity_pad = (lam / 2) * (dpdt_pad - cen)
+#     velocity_f = (lam / 2) * (dpdt - cen)
+
+#     # Crop the time array
+#     time_f = time[time_start_idx:time_end_idx]
+
+#     # Smooth the padded velocity signal using a moving average with Gaussian weights
+#     velocity_f_smooth = smoothing(
+#         velocity_pad=velocity_pad,
+#         smoothing_window=inputs["smoothing_window"],
+#         smoothing_wid=inputs["smoothing_wid"],
+#         smoothing_amp=inputs["smoothing_amp"],
+#         smoothing_sigma=inputs["smoothing_sigma"],
+#         smoothing_mu=inputs["smoothing_mu"],
+#     )
+
+#     # Return a dictionary of the outputs
+#     vc_out = {
+#         "time_f": time_f,
+#         "velocity_f": velocity_f,
+#         "velocity_f_smooth": velocity_f_smooth,
+#         "phasD2_f": dpdt,
+#         "voltage_filt": voltage_filt,
+#         "time_start_idx": time_start_idx,
+#         "time_end_idx": time_end_idx,
+#     }
+
+#     return vc_out
+
+
+# Function to calculate the velocity from the filtered voltage signal
 def velocity_calculation(
     spall_doi_finder_outputs, cen, carrier_filter_outputs, **inputs
 ):
-    # unpack dictionary values in to individual variables
+    # Unpack dictionary values into individual variables
     fs = spall_doi_finder_outputs["fs"]
     time = spall_doi_finder_outputs["time"]
     voltage_filt = carrier_filter_outputs["voltage_filt"]
@@ -1461,33 +1800,65 @@ def velocity_calculation(
     t_doi_start = spall_doi_finder_outputs["t_doi_start"]
     t_doi_end = spall_doi_finder_outputs["t_doi_end"]
 
-    # isolate signal. filter out all frequencies that are outside the range of interest
-    numpts = len(time)
-    freq = fftshift(np.arange((-numpts / 2), (numpts / 2)) * fs / numpts)
-    filt = (freq > freq_min) * (freq < freq_max)
-    voltage_filt = ifft(fft(voltage_filt) * filt)
+    # Calculate power in dB: P[dB] = 10 * log10(|signal|^2)
+    signal_power_db = 10 * np.log10(np.abs(voltage_filt) ** 2)
 
-    # get the indices in the time array closest to the domain start and end times
+    # Detect abrupt power drops (signal drop-offs)
+    threshold_drop_db = 0  # Drop-off threshold in dB
+    valid_indices = [0]  # Start with the first index as valid
+    for i in range(1, len(signal_power_db)):
+        if signal_power_db[i] - signal_power_db[i - 1] > threshold_drop_db:
+            valid_indices.append(i)
+    
+    valid_indices = np.array(valid_indices)
+    invalid_indices = np.setdiff1d(np.arange(len(signal_power_db)), valid_indices)
+
+    # Interpolate over the invalid regions
+    interp_func = interp1d(
+        time[valid_indices],
+        voltage_filt[valid_indices],
+        kind='linear',
+        bounds_error=False,
+        fill_value="extrapolate"
+    )
+    voltage_filt_interp = interp_func(time)
+
+    # Plot original and interpolated regions
+    plt.figure(figsize=(10, 6))
+    plt.plot(time[valid_indices], voltage_filt[valid_indices], 'k-', label="Valid Signal")
+    plt.plot(time[invalid_indices], voltage_filt_interp[invalid_indices], 'r-', label="Interpolated Signal")
+    plt.xlabel("Time")
+    plt.ylabel("Voltage")
+    plt.title("Signal with Interpolated Regions Highlighted")
+    plt.legend()
+    plt.show()
+
+    # Filter signal: retain frequencies within the range of interest
+    numpts = len(time)
+    freq = np.fft.fftshift(np.arange((-numpts / 2), (numpts / 2)) * fs / numpts)
+    filt = (freq > freq_min) & (freq < freq_max)
+    voltage_filt_interp = np.fft.ifft(np.fft.fft(voltage_filt_interp) * filt)
+
+    # Get indices for the domain of interest
     time_start_idx = np.argmin(np.abs(time - t_doi_start))
     time_end_idx = np.argmin(np.abs(time - t_doi_end))
 
-    # unwrap the phase angle of the filtered voltage signal
-    phas = np.unwrap(np.angle(voltage_filt), axis=0)
+    # Unwrap the phase angle of the filtered voltage signal
+    phas = np.unwrap(np.angle(voltage_filt_interp), axis=0)
 
-    # take the numerical derivative using the certral difference method with a 9-point stencil
-    # return the derivative on the domain of interest (dpdt) as well as the padded derivative to be used for smoothing
+    # Calculate numerical derivative using central difference method
     dpdt, dpdt_pad = num_derivative(
         phas, inputs["smoothing_window"], time_start_idx, time_end_idx, fs
     )
 
-    # convert the derivative in to velocity
+    # Convert the derivative into velocity
     velocity_pad = (lam / 2) * (dpdt_pad - cen)
     velocity_f = (lam / 2) * (dpdt - cen)
 
-    # crop the time array
+    # Crop the time array
     time_f = time[time_start_idx:time_end_idx]
 
-    # smooth the padded velocity signal using a moving average with gaussian weights
+    # Smooth the velocity signal
     velocity_f_smooth = smoothing(
         velocity_pad=velocity_pad,
         smoothing_window=inputs["smoothing_window"],
@@ -1497,15 +1868,18 @@ def velocity_calculation(
         smoothing_mu=inputs["smoothing_mu"],
     )
 
-    # return a dictionary of the outputs
+
+    # Return outputs
     vc_out = {
         "time_f": time_f,
         "velocity_f": velocity_f,
         "velocity_f_smooth": velocity_f_smooth,
         "phasD2_f": dpdt,
-        "voltage_filt": voltage_filt,
+        "voltage_filt": voltage_filt_interp,
         "time_start_idx": time_start_idx,
         "time_end_idx": time_end_idx,
     }
 
     return vc_out
+
+# %%
